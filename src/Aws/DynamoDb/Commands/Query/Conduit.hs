@@ -67,6 +67,7 @@ responseParser = pobject key >>= maybe (fail "incomplete") return . toQueryRespo
     key "ConsumedCapacity" = setConsumed <$> Just <$> parse
     key "LastKey"          = setLastKey  <$> parseMaybe parseAttributeJson <$> pvalue
     key "Items"            = mempty <$ (parray . const $ parse >>= lift . tell . maybeToList)
+    key _                  = return mempty
     setCount    c = mempty { incompleteCount    = Last c }
     setScanned  c = mempty { incompleteScanned  = Last c }
     setConsumed c = mempty { incompleteConsumed = Last c }
