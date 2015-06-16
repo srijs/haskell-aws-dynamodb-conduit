@@ -5,24 +5,21 @@ module Aws.DynamoDb.Commands.Query.Conduit
   , ConduitQuery(..), ConduitQueryResponse
   ) where
 
-import Data.Aeson (parseJSON)
 import Data.Aeson.Types (parseMaybe)
-import Data.ByteString (ByteString)
-import Data.Conduit (ConduitM, fuse, yield, await, ResumableSource, unwrapResumable)
-import Data.IORef (IORef)
+import Data.Conduit (ConduitM, fuse, yield, await, unwrapResumable)
 import Data.JSON.ToGo.Parser
-import Data.Maybe (maybeToList, fromMaybe)
-import Data.Monoid (Monoid, mempty, mappend, (<>), Last(..))
+import Data.Maybe (fromMaybe)
+import Data.Monoid (Monoid, mempty)
 import Data.Sequence (Seq, singleton)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
-import Control.Applicative ((<$), (<$>), (<*>))
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
-import Control.Monad.Trans.Parser (ParserT, runParserT, runParserTWith, eitherResultM, ResultM(..))
-import Control.Monad.Trans.Resource (ResourceT, register, runResourceT, throwM)
-import Control.Monad.Trans.Writer.Lazy (WriterT, tell, runWriterT)
+import Control.Monad.Trans.Parser (ParserT(..), ResultM(..), runStateParserT)
+import Control.Monad.Trans.Resource (register, runResourceT, throwM)
+import Control.Monad.Trans.State (StateT, modify)
+import Control.Monad.Trans.Writer (WriterT, tell, runWriterT)
 
 import qualified Network.HTTP.Types as HTTP
 import qualified Network.HTTP.Conduit as HTTP
@@ -39,45 +36,41 @@ instance SignQuery ConduitQuery where
   signQuery = ddbSignQuery "Query" . getQuery
 
 data IncompleteQueryResponse = IncompleteQueryResponse
-  { incompleteLastKey  :: Last [Attribute]
-  , incompleteCount    :: Last Int
-  , incompleteScanned  :: Last Int
-  , incompleteConsumed :: Last ConsumedCapacity
+  { incompleteLastKey  :: Maybe [Attribute]
+  , incompleteCount    :: Maybe Int
+  , incompleteScanned  :: Maybe Int
+  , incompleteConsumed :: Maybe ConsumedCapacity
   }
+
+defaultIncompleteQueryResponse = IncompleteQueryResponse Nothing Nothing Nothing Nothing
 
 toQueryResponse :: IncompleteQueryResponse -> Maybe (QueryResponse)
 toQueryResponse icr = do
   let items    = mempty
-      lastKey  = getLast $ incompleteLastKey  icr
-      consumed = getLast $ incompleteConsumed icr
-  count   <- getLast $ incompleteCount   icr
-  scanned <- getLast $ incompleteScanned icr
+      lastKey  = incompleteLastKey  icr
+      consumed = incompleteConsumed icr
+  count   <- incompleteCount   icr
+  scanned <- incompleteScanned icr
   return $ QueryResponse items lastKey count scanned consumed
 
-instance Monoid IncompleteQueryResponse where
-  mempty = IncompleteQueryResponse mempty mempty mempty mempty
-  mappend (IncompleteQueryResponse a b c d)
-          (IncompleteQueryResponse e f g h)
-    = IncompleteQueryResponse (a <> e) (b <> f) (c <> g) (d <> h)
-
-responseParser :: Monad m => ParserM (WriterT (Seq Item) m) QueryResponse
-responseParser = pobject key >>= maybe (fail "incomplete") return . toQueryResponse
+responseParser :: Monad m => ParserM (StateT IncompleteQueryResponse (WriterT (Seq Item) m)) ()
+responseParser = pobject key
   where 
-    key "Count"            = setCount    <$> Just <$> parse
-    key "ScannedCount"     = setScanned  <$> Just <$> parse
-    key "ConsumedCapacity" = setConsumed <$> Just <$> parse
-    key "LastKey"          = setLastKey  <$> parseMaybe parseAttributeJson <$> pvalue
-    key "Items"            = mempty <$ (parray . const $ parse >>= lift . tell . maybeToSeq)
-    key _                  = return mempty
-    setCount    c = mempty { incompleteCount    = Last c }
-    setScanned  c = mempty { incompleteScanned  = Last c }
-    setConsumed c = mempty { incompleteConsumed = Last c }
-    setLastKey  c = mempty { incompleteLastKey  = Last c }
+    key "Count"            = parse >>= lift . modify . setCount . Just
+    key "ScannedCount"     = parse >>= lift . modify . setScanned . Just
+    key "ConsumedCapacity" = parse >>= lift . modify . setConsumed . Just
+    key "LastKey"          = pvalue >>= lift . modify . setLastKey . parseMaybe parseAttributeJson
+    key "Items"            = parray . const $ parse >>= lift . lift . tell . maybeToSeq
+    key _                  = return ()
+    setCount    c icq = icq { incompleteCount    = c }
+    setScanned  c icq = icq { incompleteScanned  = c }
+    setConsumed c icq = icq { incompleteConsumed = c }
+    setLastKey  c icq = icq { incompleteLastKey  = c }
     maybeToSeq = maybe mempty singleton
 
-runParser :: (Monad m, Monoid i, Eq i) => ParserT i (WriterT a m) r -> ConduitM i a m r
-runParser p = await' >>= lift . runWriterT . runParserT p >>= \w -> case w of
-  (PartialM p', a) -> yield a >> runParser p'
+conduitWriterParserT :: (Monad m, Monoid i, Eq i) => ParserT i (WriterT a m) r -> ConduitM i a m r
+conduitWriterParserT p = await' >>= lift . runWriterT . runParserT p >>= \w -> case w of
+  (PartialM p', a) -> yield a >> conduitWriterParserT p'
   (FailM i s,   a) -> yield a >> fail s
   (DoneM i r,   a) -> yield a >> return r
   where await' = await >>= maybe (return mempty) (\i -> if i == mempty then await' else return i)
@@ -87,7 +80,7 @@ consume p rsrc = do
     (src, finalize) <- unwrapResumable rsrc
     register (runResourceT finalize)
     return src
-  fuse src $ runParser p
+  fuse src $ conduitWriterParserT p
 
 instance Transaction ConduitQuery ConduitQueryResponse
 
@@ -107,7 +100,9 @@ instance ResponseConsumer ConduitQuery ConduitQueryResponse where
       meta = DdbResponse amzCrc amzId
       tellMeta = liftIO $ tellMetadataRef ref meta
 
-      rSuccess = consume responseParser $ HTTP.responseBody resp
+      rSuccess = do
+        iqr <- consume (runStateParserT responseParser defaultIncompleteQueryResponse) $ HTTP.responseBody resp
+        maybe (fail "incomplete") return (toQueryResponse iqr)
 
       rError = do
         err'' <- consume parse $ HTTP.responseBody resp
