@@ -13,6 +13,7 @@ import Data.IORef (IORef)
 import Data.JSON.ToGo.Parser
 import Data.Maybe (maybeToList, fromMaybe)
 import Data.Monoid (Monoid, mempty, mappend, (<>), Last(..))
+import Data.Sequence (Seq, singleton)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
@@ -59,19 +60,20 @@ instance Monoid IncompleteQueryResponse where
           (IncompleteQueryResponse e f g h)
     = IncompleteQueryResponse (a <> e) (b <> f) (c <> g) (d <> h)
 
-responseParser :: Monad m => ParserM (WriterT [Item] m) QueryResponse
+responseParser :: Monad m => ParserM (WriterT (Seq Item) m) QueryResponse
 responseParser = pobject key >>= maybe (fail "incomplete") return . toQueryResponse
   where 
     key "Count"            = setCount    <$> Just <$> parse
     key "ScannedCount"     = setScanned  <$> Just <$> parse
     key "ConsumedCapacity" = setConsumed <$> Just <$> parse
     key "LastKey"          = setLastKey  <$> parseMaybe parseAttributeJson <$> pvalue
-    key "Items"            = mempty <$ (parray . const $ parse >>= lift . tell . maybeToList)
+    key "Items"            = mempty <$ (parray . const $ parse >>= lift . tell . maybeToSeq)
     key _                  = return mempty
     setCount    c = mempty { incompleteCount    = Last c }
     setScanned  c = mempty { incompleteScanned  = Last c }
     setConsumed c = mempty { incompleteConsumed = Last c }
     setLastKey  c = mempty { incompleteLastKey  = Last c }
+    maybeToSeq = maybe mempty singleton
 
 runParser :: (Monad m, Monoid i, Eq i) => ParserT i (WriterT a m) r -> ConduitM i a m r
 runParser p = await' >>= lift . runWriterT . runParserT p >>= \w -> case w of
@@ -89,7 +91,7 @@ consume p rsrc = do
 
 instance Transaction ConduitQuery ConduitQueryResponse
 
-type ConduitQueryResponse = ConduitResponse [Item] QueryResponse
+type ConduitQueryResponse = ConduitResponse (Seq Item) QueryResponse
 
 instance ResponseConsumer ConduitQuery ConduitQueryResponse where
   type ResponseMetadata ConduitQueryResponse = DdbResponse
