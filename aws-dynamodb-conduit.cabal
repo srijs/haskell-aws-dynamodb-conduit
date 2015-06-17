@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                aws-dynamodb-conduit
-version:             0.1.0.3
+version:             0.1.0.4
 synopsis:            Conduit-based interface for AWS DynamoDB
 -- description:         
 homepage:            https://github.com/srijs/haskell-aws-dynamodb-query
