@@ -56,10 +56,10 @@ toQueryResponse icr = do
 responseParser :: Monad m => ParserM (StateT IncompleteQueryResponse (WriterT (Seq Item) m)) ()
 responseParser = pobject key
   where 
-    key "Count"            = parse >>= lift . modify . setCount . Just
-    key "ScannedCount"     = parse >>= lift . modify . setScanned . Just
-    key "ConsumedCapacity" = parse >>= lift . modify . setConsumed . Just
-    key "LastKey"          = pvalue >>= lift . modify . setLastKey . parseMaybe parseAttributeJson
+    key "Count"            = parse  >>= lift . modify . setCount    . Just
+    key "ScannedCount"     = parse  >>= lift . modify . setScanned  . Just
+    key "ConsumedCapacity" = parse  >>= lift . modify . setConsumed . Just
+    key "LastKey"          = pvalue >>= lift . modify . setLastKey  . parseMaybe parseAttributeJson
     key "Items"            = parray . const $ parse >>= lift . lift . tell . maybeToSeq
     key _                  = return ()
     setCount    c icq = icq { incompleteCount    = c }
