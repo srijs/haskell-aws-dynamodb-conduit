@@ -17,7 +17,7 @@ import qualified Data.Text.Encoding as T
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Parser (ParserT(..), ResultM(..), runStateParserT)
-import Control.Monad.Trans.Resource (register, runResourceT, throwM)
+import Control.Monad.Trans.Resource (register, runResourceT, throwM, transResourceT)
 import Control.Monad.Trans.State (StateT, modify)
 import Control.Monad.Trans.Writer (WriterT, tell, runWriterT)
 
@@ -61,7 +61,7 @@ responseParser = pobject key
     key "ConsumedCapacity" = parse  >>= lift . modify . setConsumed . Just
     key "LastKey"          = pvalue >>= lift . modify . setLastKey  . parseMaybe parseAttributeJson
     key "Items"            = parray . const $ parse >>= lift . lift . tell . maybeToSeq
-    key _                  = return ()
+    key _                  = pvalue >> return ()
     setCount    c icq = icq { incompleteCount    = c }
     setScanned  c icq = icq { incompleteScanned  = c }
     setConsumed c icq = icq { incompleteConsumed = c }
@@ -78,7 +78,8 @@ conduitWriterParserT p = await' >>= lift . runWriterT . runParserT p >>= \w -> c
 consume p rsrc = do
   src <- lift $ do
     (src, finalize) <- unwrapResumable rsrc
-    register (runResourceT finalize)
+    finalize' <- transResourceT return finalize
+    register finalize'
     return src
   fuse src $ conduitWriterParserT p
 
